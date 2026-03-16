@@ -104,54 +104,107 @@ app.use('/upload', (err, req, res, next) => {
 app.get('/api/files', (req, res) => {
   try {
     const folder = req.query.folder || '';
-    const targetDir = path.join(UPLOAD_DIR, sanitize(folder || '.'));
-    
+
     // ถ้าไม่ระบุโฟลเดอร์ → แสดงรายการโฟลเดอร์ทั้งหมด
     if (!folder) {
-      if (!fs.existsSync(UPLOAD_DIR)) return res.json({ folders: [], files: [] });
-      const items = fs.readdirSync(UPLOAD_DIR, { withFileTypes: true });
-      const folders = items.filter(i => i.isDirectory()).map(i => {
-        const folderPath = path.join(UPLOAD_DIR, i.name);
-        const folderFiles = fs.readdirSync(folderPath).filter(f => fs.statSync(path.join(folderPath, f)).isFile());
-        const totalSize = folderFiles.reduce((s, f) => s + fs.statSync(path.join(folderPath, f)).size, 0);
-        return { name: i.name, fileCount: folderFiles.length, totalSize };
-      });
+      if (!fs.existsSync(UPLOAD_DIR)) {
+        console.log('  📁 uploads/ ยังไม่มี');
+        return res.json({ folders: [], files: [] });
+      }
+      let items;
+      try { items = fs.readdirSync(UPLOAD_DIR, { withFileTypes: true }); }
+      catch(e) { console.error('  ❌ อ่านโฟลเดอร์ไม่ได้:', e.message); return res.json({ folders: [], files: [] }); }
+
+      const folders = [];
+      for (const item of items) {
+        if (!item.isDirectory()) continue;
+        try {
+          const folderPath = path.join(UPLOAD_DIR, item.name);
+          const dirFiles = fs.readdirSync(folderPath);
+          let fileCount = 0, totalSize = 0;
+          for (const f of dirFiles) {
+            try {
+              const st = fs.statSync(path.join(folderPath, f));
+              if (st.isFile()) { fileCount++; totalSize += st.size; }
+            } catch(e) { /* ข้ามไฟล์ที่อ่านไม่ได้ */ }
+          }
+          folders.push({ name: item.name, fileCount, totalSize });
+        } catch(e) { /* ข้ามโฟลเดอร์ที่อ่านไม่ได้ */ }
+      }
+
+      console.log('  📁 โฟลเดอร์ทั้งหมด:', folders.length);
       return res.json({ folders, files: [] });
     }
 
-    // แสดงไฟล์ในโฟลเดอร์
-    if (!fs.existsSync(targetDir)) return res.json({ folders: [], files: [] });
-    const items = fs.readdirSync(targetDir, { withFileTypes: true });
-    const files = items.filter(i => i.isFile()).map(i => {
-      const stats = fs.statSync(path.join(targetDir, i.name));
-      return {
-        name: i.name,
-        size: stats.size,
-        modified: stats.mtime,
-        type: getFileType(i.name)
-      };
-    });
+    // แสดงไฟล์ในโฟลเดอร์ (ไม่ sanitize ซ้ำ เพราะชื่อจริงบน disk อาจต่างจาก sanitize)
+    // ลองหาโฟลเดอร์จากชื่อตรงๆ ก่อน ถ้าไม่เจอค่อย sanitize
+    let targetDir = path.join(UPLOAD_DIR, folder);
+    if (!fs.existsSync(targetDir)) {
+      targetDir = path.join(UPLOAD_DIR, sanitize(folder));
+    }
+    if (!fs.existsSync(targetDir)) {
+      console.log('  ❌ ไม่พบโฟลเดอร์:', folder);
+      return res.json({ folders: [], files: [] });
+    }
+
+    let items;
+    try { items = fs.readdirSync(targetDir, { withFileTypes: true }); }
+    catch(e) { return res.json({ folders: [], files: [] }); }
+
+    const files = [];
+    for (const item of items) {
+      if (!item.isFile()) continue;
+      try {
+        const st = fs.statSync(path.join(targetDir, item.name));
+        files.push({
+          name: item.name,
+          size: st.size,
+          modified: st.mtime,
+          type: getFileType(item.name)
+        });
+      } catch(e) { /* ข้ามไฟล์ที่อ่านไม่ได้ */ }
+    }
     files.sort((a, b) => new Date(b.modified) - new Date(a.modified));
+
+    console.log('  📂', folder, '→', files.length, 'ไฟล์');
     return res.json({ folders: [], files, folderName: folder });
   } catch (err) {
-    res.json({ folders: [], files: [], error: err.message });
+    console.error('  ❌ /api/files error:', err.message);
+    return res.json({ folders: [], files: [], error: err.message });
   }
 });
 
 // ดาวน์โหลดไฟล์
 app.get('/download/:folder/:file', (req, res) => {
-  const filePath = path.join(UPLOAD_DIR, sanitize(req.params.folder), sanitize(req.params.file));
+  // ลองชื่อตรงก่อน ถ้าไม่เจอค่อย sanitize
+  let filePath = path.join(UPLOAD_DIR, req.params.folder, req.params.file);
+  if (!fs.existsSync(filePath)) {
+    filePath = path.join(UPLOAD_DIR, sanitize(req.params.folder), sanitize(req.params.file));
+  }
   if (!fs.existsSync(filePath)) return res.status(404).send('File not found');
   res.download(filePath);
+});
+
+// ดูไฟล์ในเบราว์เซอร์ (รูปภาพ/วิดีโอ)
+app.get('/preview/:folder/:file', (req, res) => {
+  let filePath = path.join(UPLOAD_DIR, req.params.folder, req.params.file);
+  if (!fs.existsSync(filePath)) {
+    filePath = path.join(UPLOAD_DIR, sanitize(req.params.folder), sanitize(req.params.file));
+  }
+  if (!fs.existsSync(filePath)) return res.status(404).send('File not found');
+  res.sendFile(filePath);
 });
 
 // ลบไฟล์
 app.delete('/api/files/:folder/:file', (req, res) => {
   try {
-    const filePath = path.join(UPLOAD_DIR, sanitize(req.params.folder), sanitize(req.params.file));
+    let filePath = path.join(UPLOAD_DIR, req.params.folder, req.params.file);
+    if (!fs.existsSync(filePath)) {
+      filePath = path.join(UPLOAD_DIR, sanitize(req.params.folder), sanitize(req.params.file));
+    }
     if (!fs.existsSync(filePath)) return res.json({ success: false, error: 'ไม่พบไฟล์' });
     fs.unlinkSync(filePath);
-    console.log(`  🗑️ ลบ: ${req.params.folder}/${req.params.file}`);
+    console.log('  🗑️ ลบ:', req.params.folder + '/' + req.params.file);
     res.json({ success: true });
   } catch (err) {
     res.json({ success: false, error: err.message });
@@ -161,10 +214,13 @@ app.delete('/api/files/:folder/:file', (req, res) => {
 // ลบโฟลเดอร์ทั้งโฟลเดอร์
 app.delete('/api/folder/:folder', (req, res) => {
   try {
-    const folderPath = path.join(UPLOAD_DIR, sanitize(req.params.folder));
+    let folderPath = path.join(UPLOAD_DIR, req.params.folder);
+    if (!fs.existsSync(folderPath)) {
+      folderPath = path.join(UPLOAD_DIR, sanitize(req.params.folder));
+    }
     if (!fs.existsSync(folderPath)) return res.json({ success: false, error: 'ไม่พบโฟลเดอร์' });
     fs.rmSync(folderPath, { recursive: true, force: true });
-    console.log(`  🗑️ ลบโฟลเดอร์: ${req.params.folder}`);
+    console.log('  🗑️ ลบโฟลเดอร์:', req.params.folder);
     res.json({ success: true });
   } catch (err) {
     res.json({ success: false, error: err.message });
@@ -685,19 +741,77 @@ async function loadContent(){
       var ts=data.files.reduce(function(s,f){return s+f.size;},0);
       statsEl.innerHTML='<div class="stat-box"><div class="stat-num">'+data.files.length+'</div><div class="stat-label">ไฟล์</div></div><div class="stat-box"><div class="stat-num">'+fmtSize(ts)+'</div><div class="stat-label">ขนาดรวม</div></div>';
       var h='';data.files.forEach(function(f,i){
-        h+='<div class="file-card" style="animation-delay:'+(i*.03)+'s"><div class="icon-box icon-'+f.type+'">'+typeIcon(f.type)+'</div>';
+        var previewUrl='/preview/'+encodeURIComponent(currentFolder)+'/'+encodeURIComponent(f.name);
+        var downloadUrl='/download/'+encodeURIComponent(currentFolder)+'/'+encodeURIComponent(f.name);
+        var canPreview=(f.type==='image'||f.type==='video'||f.type==='pdf');
+
+        h+='<div class="file-card" style="animation-delay:'+(i*.03)+'s">';
+
+        // thumbnail สำหรับรูป
+        if(f.type==='image'){
+          h+='<img src="'+previewUrl+'" style="width:42px;height:42px;border-radius:8px;object-fit:cover;border:1px solid #bfdbfe;flex-shrink:0;cursor:pointer;" onclick="showPreview(\''+previewUrl.replace(/'/g,"\\'")+'\',\'image\',\''+f.name.replace(/'/g,"\\'")+'\')">';
+        } else {
+          h+='<div class="icon-box icon-'+f.type+'">'+typeIcon(f.type)+'</div>';
+        }
+
         h+='<div style="flex:1;min-width:0;"><div style="font-weight:500;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+f.name+'</div><div class="meta">'+fmtSize(f.size)+' · '+fmtDate(f.modified)+'</div></div>';
-        h+='<div class="actions"><a href="/download/'+encodeURIComponent(currentFolder)+'/'+encodeURIComponent(f.name)+'" class="act-btn dl">⬇ โหลด</a>';
+        h+='<div class="actions">';
+        if(canPreview) h+='<button class="act-btn" onclick="showPreview(\''+previewUrl.replace(/'/g,"\\'")+'\',\''+f.type+'\',\''+f.name.replace(/'/g,"\\'")+'\')">👁️ ดู</button>';
+        h+='<a href="'+downloadUrl+'" class="act-btn dl">⬇ โหลด</a>';
         h+='<button class="act-btn del" onclick="deleteFile(\''+f.name.replace(/'/g,"\\'")+'\')">🗑️</button></div></div>';
       });contentEl.innerHTML=h;
     }
-  }catch(e){loadingEl.classList.add('hidden');contentEl.innerHTML='<div class="empty" style="color:#dc2626;">❌ '+e.message+'</div>';}
+  }catch(e){loadingEl.classList.add('hidden');contentEl.innerHTML='<div class="empty" style="color:#dc2626;">❌ โหลดข้อมูลไม่ได้: '+e.message+'</div>';}
 }
 
 function goRoot(){currentFolder='';loadContent();}
 function openFolder(n){currentFolder=n;loadContent();}
 async function deleteFile(n){showConfirm('ลบไฟล์ "'+n+'" ?',async function(){await fetch('/api/files/'+encodeURIComponent(currentFolder)+'/'+encodeURIComponent(n),{method:'DELETE'});loadContent();});}
 async function deleteFolder(n){showConfirm('ลบโฟลเดอร์ "'+n+'" และไฟล์ทั้งหมด?',async function(){await fetch('/api/folder/'+encodeURIComponent(n),{method:'DELETE'});loadContent();});}
+
+// ── Preview Modal ──
+function showPreview(url, type, name){
+  var overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:1000;padding:20px;';
+
+  // Header
+  var header=document.createElement('div');
+  header.style.cssText='display:flex;align-items:center;justify-content:space-between;width:100%;max-width:90vw;margin-bottom:10px;';
+  var title=document.createElement('span');
+  title.style.cssText='color:#fff;font-size:14px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+  title.textContent=name;
+  var closeBtn=document.createElement('button');
+  closeBtn.style.cssText='background:none;border:none;color:#fff;font-size:28px;cursor:pointer;padding:0 8px;flex-shrink:0;';
+  closeBtn.textContent='✕';
+  closeBtn.addEventListener('click',function(){document.body.removeChild(overlay);});
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+  overlay.appendChild(header);
+
+  // Content
+  var content;
+  if(type==='image'){
+    content=document.createElement('img');
+    content.src=url;
+    content.style.cssText='max-width:90vw;max-height:80vh;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.3);object-fit:contain;';
+  } else if(type==='video'){
+    content=document.createElement('video');
+    content.src=url;
+    content.controls=true;
+    content.autoplay=true;
+    content.style.cssText='max-width:90vw;max-height:80vh;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.3);';
+  } else if(type==='pdf'){
+    content=document.createElement('iframe');
+    content.src=url;
+    content.style.cssText='width:90vw;height:80vh;border:none;border-radius:12px;';
+  }
+  if(content) overlay.appendChild(content);
+
+  // คลิกพื้นหลังเพื่อปิด
+  overlay.addEventListener('click',function(e){if(e.target===overlay) document.body.removeChild(overlay);});
+
+  document.body.appendChild(overlay);
+}
 
 loadContent();
 </script>
