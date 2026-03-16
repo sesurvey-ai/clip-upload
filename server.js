@@ -93,10 +93,99 @@ app.post('/upload', upload.single('file'), (req, res) => {
 });
 
 // Error handler สำหรับ multer
-app.use((err, req, res, next) => {
+app.use('/upload', (err, req, res, next) => {
   console.error('  ❌ Upload Error:', err.message);
   res.json({ success: false, error: err.message });
 });
+
+// ── File Browser API ──
+
+// ดึงรายการโฟลเดอร์และไฟล์ทั้งหมด
+app.get('/api/files', (req, res) => {
+  try {
+    const folder = req.query.folder || '';
+    const targetDir = path.join(UPLOAD_DIR, sanitize(folder || '.'));
+    
+    // ถ้าไม่ระบุโฟลเดอร์ → แสดงรายการโฟลเดอร์ทั้งหมด
+    if (!folder) {
+      if (!fs.existsSync(UPLOAD_DIR)) return res.json({ folders: [], files: [] });
+      const items = fs.readdirSync(UPLOAD_DIR, { withFileTypes: true });
+      const folders = items.filter(i => i.isDirectory()).map(i => {
+        const folderPath = path.join(UPLOAD_DIR, i.name);
+        const folderFiles = fs.readdirSync(folderPath).filter(f => fs.statSync(path.join(folderPath, f)).isFile());
+        const totalSize = folderFiles.reduce((s, f) => s + fs.statSync(path.join(folderPath, f)).size, 0);
+        return { name: i.name, fileCount: folderFiles.length, totalSize };
+      });
+      return res.json({ folders, files: [] });
+    }
+
+    // แสดงไฟล์ในโฟลเดอร์
+    if (!fs.existsSync(targetDir)) return res.json({ folders: [], files: [] });
+    const items = fs.readdirSync(targetDir, { withFileTypes: true });
+    const files = items.filter(i => i.isFile()).map(i => {
+      const stats = fs.statSync(path.join(targetDir, i.name));
+      return {
+        name: i.name,
+        size: stats.size,
+        modified: stats.mtime,
+        type: getFileType(i.name)
+      };
+    });
+    files.sort((a, b) => new Date(b.modified) - new Date(a.modified));
+    return res.json({ folders: [], files, folderName: folder });
+  } catch (err) {
+    res.json({ folders: [], files: [], error: err.message });
+  }
+});
+
+// ดาวน์โหลดไฟล์
+app.get('/download/:folder/:file', (req, res) => {
+  const filePath = path.join(UPLOAD_DIR, sanitize(req.params.folder), sanitize(req.params.file));
+  if (!fs.existsSync(filePath)) return res.status(404).send('File not found');
+  res.download(filePath);
+});
+
+// ลบไฟล์
+app.delete('/api/files/:folder/:file', (req, res) => {
+  try {
+    const filePath = path.join(UPLOAD_DIR, sanitize(req.params.folder), sanitize(req.params.file));
+    if (!fs.existsSync(filePath)) return res.json({ success: false, error: 'ไม่พบไฟล์' });
+    fs.unlinkSync(filePath);
+    console.log(`  🗑️ ลบ: ${req.params.folder}/${req.params.file}`);
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// ลบโฟลเดอร์ทั้งโฟลเดอร์
+app.delete('/api/folder/:folder', (req, res) => {
+  try {
+    const folderPath = path.join(UPLOAD_DIR, sanitize(req.params.folder));
+    if (!fs.existsSync(folderPath)) return res.json({ success: false, error: 'ไม่พบโฟลเดอร์' });
+    fs.rmSync(folderPath, { recursive: true, force: true });
+    console.log(`  🗑️ ลบโฟลเดอร์: ${req.params.folder}`);
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// หน้า File Browser
+app.get('/files', (req, res) => {
+  res.send(FILES_PAGE);
+});
+
+function getFileType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  if (['.jpg','.jpeg','.png','.gif','.webp','.svg','.bmp'].includes(ext)) return 'image';
+  if (['.mp4','.avi','.mov','.mkv','.webm','.wmv'].includes(ext)) return 'video';
+  if (['.mp3','.wav','.ogg','.flac','.aac'].includes(ext)) return 'audio';
+  if (['.pdf'].includes(ext)) return 'pdf';
+  if (['.doc','.docx','.xls','.xlsx','.ppt','.pptx','.txt','.csv'].includes(ext)) return 'document';
+  if (['.zip','.rar','.7z','.tar','.gz'].includes(ext)) return 'archive';
+  return 'other';
+}
 
 function fmtSize(b) {
   if (b < 1024) return b + ' B';
@@ -243,7 +332,10 @@ const HTML_PAGE = `<!DOCTYPE html>
   </div>
 </div>
 
-<div style="text-align:center;padding:0 24px 36px;font-size:11px;color:#94a3b8;">
+<div style="text-align:center;padding:0 24px 12px;">
+  <a href="/files" style="display:inline-flex;align-items:center;gap:6px;padding:10px 22px;border-radius:12px;font-size:13px;font-weight:500;border:1.5px solid #bfdbfe;background:#fff;color:#2563eb;text-decoration:none;transition:all .2s;">📁 ดูไฟล์ที่อัปโหลดแล้ว</a>
+</div>
+<div style="text-align:center;padding:8px 24px 36px;font-size:11px;color:#94a3b8;">
   ไฟล์จะถูกบันทึกบนเครื่องเซิร์ฟเวอร์โดยตรง
 </div>
 
@@ -445,6 +537,169 @@ function resetAll(){
   uploadBtn.classList.remove('hidden');progSection.classList.add('hidden');
   clearAllBtn.style.display='';hideError();updateUI();
 }
+</script>
+</body>
+</html>`;
+
+// ══════════════════════════════════════════════════════
+//  File Browser Page
+// ══════════════════════════════════════════════════════
+const FILES_PAGE = `<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>File Browser — Drive Uploader</title>
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    ::selection{background:#2563eb;color:#fff}
+    html,body{min-height:100vh;background:linear-gradient(160deg,#eff6ff 0%,#dbeafe 40%,#e0f2fe 100%);font-family:'Prompt',sans-serif;color:#1e293b}
+    @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .card{animation:fadeUp .4s ease-out both;max-width:700px;margin:24px auto 32px;padding:28px;background:rgba(255,255,255,0.85);backdrop-filter:blur(24px);border-radius:22px;border:1px solid #bfdbfe;box-shadow:0 8px 40px rgba(37,99,235,.08)}
+    a{text-decoration:none;color:#2563eb}
+    a:hover{text-decoration:underline}
+    .nav{display:flex;align-items:center;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+    .nav-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:10px;font-size:13px;font-weight:500;border:1.5px solid #bfdbfe;background:#fff;color:#2563eb;cursor:pointer;transition:all .2s;font-family:'Prompt',sans-serif}
+    .nav-btn:hover{background:#eff6ff;border-color:#3b82f6}
+    .nav-btn.active{background:#2563eb;color:#fff;border-color:#2563eb}
+    .folder-card{display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:#fff;border:1.5px solid #e2e8f0;margin-bottom:8px;cursor:pointer;transition:all .2s;animation:fadeUp .3s ease-out both}
+    .folder-card:hover{border-color:#3b82f6;background:#eff6ff;transform:translateY(-1px);box-shadow:0 4px 12px rgba(37,99,235,.08)}
+    .file-card{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;background:#fff;border:1px solid #e2e8f0;margin-bottom:6px;animation:fadeUp .3s ease-out both;transition:all .15s}
+    .file-card:hover{border-color:#bfdbfe;background:#f8fafc}
+    .icon-box{width:42px;height:42px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+    .icon-folder{background:#dbeafe}
+    .icon-image{background:#fef3c7}
+    .icon-video{background:#fce7f3}
+    .icon-audio{background:#f3e8ff}
+    .icon-pdf{background:#fee2e2}
+    .icon-document{background:#dbeafe}
+    .icon-archive{background:#e2e8f0}
+    .icon-other{background:#f1f5f9}
+    .meta{font-size:11px;color:#94a3b8}
+    .actions{display:flex;gap:6px;margin-left:auto;flex-shrink:0}
+    .act-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:500;border:1px solid #e2e8f0;background:#fff;cursor:pointer;transition:all .15s;font-family:'Prompt',sans-serif;color:#475569}
+    .act-btn:hover{background:#f1f5f9}
+    .act-btn.dl{color:#2563eb;border-color:#bfdbfe}
+    .act-btn.dl:hover{background:#eff6ff}
+    .act-btn.del{color:#dc2626;border-color:#fca5a5}
+    .act-btn.del:hover{background:#fef2f2}
+    .empty{text-align:center;padding:40px 20px;color:#94a3b8;font-size:14px}
+    .stats{display:flex;gap:16px;margin-bottom:18px;flex-wrap:wrap}
+    .stat-box{padding:12px 18px;border-radius:12px;background:#eff6ff;border:1px solid #bfdbfe;flex:1;min-width:100px}
+    .stat-num{font-size:22px;font-weight:700;color:#2563eb}
+    .stat-label{font-size:11px;color:#64748b;margin-top:2px}
+    .spinner-page{display:flex;align-items:center;justify-content:center;padding:60px;color:#94a3b8;gap:10px}
+    .spin{width:20px;height:20px;border:3px solid #bfdbfe;border-top-color:#2563eb;border-radius:50%;animation:spin .7s linear infinite}
+    .hidden{display:none!important}
+    .confirm-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:999}
+    .confirm-box{background:#fff;border-radius:16px;padding:24px;max-width:360px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,.15);text-align:center}
+    .confirm-box p{font-size:14px;color:#475569;margin:12px 0 20px}
+    .confirm-box .btns{display:flex;gap:10px;justify-content:center}
+    .confirm-box .btns button{padding:8px 20px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Prompt',sans-serif;border:none}
+    .cbtn-cancel{background:#f1f5f9;color:#475569}
+    .cbtn-cancel:hover{background:#e2e8f0}
+    .cbtn-danger{background:#dc2626;color:#fff}
+    .cbtn-danger:hover{background:#b91c1c}
+  </style>
+</head>
+<body>
+
+<div style="padding:36px 24px 0;max-width:700px;margin:0 auto;">
+  <div style="display:flex;align-items:center;gap:14px;">
+    <div style="width:48px;height:48px;border-radius:14px;background:linear-gradient(135deg,#2563eb,#3b82f6);display:flex;align-items:center;justify-content:center;font-size:24px;box-shadow:0 6px 24px rgba(37,99,235,.25);">📁</div>
+    <div>
+      <h1 style="font-size:24px;font-weight:700;letter-spacing:-.03em;background:linear-gradient(135deg,#1e40af 20%,#2563eb);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">File Browser</h1>
+      <p style="font-size:13px;color:#64748b;font-weight:300;">ดูและจัดการไฟล์ที่อัปโหลด</p>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="nav">
+    <a href="/"><button class="nav-btn">☁️ อัปโหลด</button></a>
+    <button class="nav-btn active">📁 ไฟล์ทั้งหมด</button>
+    <div style="flex:1"></div>
+    <button id="refreshBtn" class="nav-btn" style="font-size:16px;padding:8px 12px;">🔄</button>
+  </div>
+  <div id="breadcrumb" style="font-size:14px;color:#64748b;margin-bottom:16px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"></div>
+  <div id="statsSection" class="stats"></div>
+  <div id="loading" class="spinner-page"><div class="spin"></div> กำลังโหลด...</div>
+  <div id="content"></div>
+</div>
+
+<div id="confirmOverlay" class="confirm-overlay hidden">
+  <div class="confirm-box">
+    <div style="font-size:32px;">🗑️</div>
+    <p id="confirmText"></p>
+    <div class="btns">
+      <button class="cbtn-cancel" id="confirmCancel">ยกเลิก</button>
+      <button class="cbtn-danger" id="confirmOk">ลบ</button>
+    </div>
+  </div>
+</div>
+
+<div style="text-align:center;padding:16px 24px 36px;font-size:11px;color:#94a3b8;">Drive Uploader · File Browser</div>
+
+<script>
+var currentFolder='';
+var confirmCb=null;
+
+var contentEl=document.getElementById('content');
+var loadingEl=document.getElementById('loading');
+var breadcrumbEl=document.getElementById('breadcrumb');
+var statsEl=document.getElementById('statsSection');
+var confirmOverlay=document.getElementById('confirmOverlay');
+
+document.getElementById('refreshBtn').addEventListener('click',function(){loadContent();});
+document.getElementById('confirmCancel').addEventListener('click',function(){confirmOverlay.classList.add('hidden');});
+document.getElementById('confirmOk').addEventListener('click',function(){confirmOverlay.classList.add('hidden');if(confirmCb)confirmCb();});
+
+function showConfirm(t,cb){document.getElementById('confirmText').textContent=t;confirmCb=cb;confirmOverlay.classList.remove('hidden');}
+function fmtSize(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';if(b<1073741824)return(b/1048576).toFixed(1)+' MB';return(b/1073741824).toFixed(1)+' GB';}
+function fmtDate(d){var t=new Date(d);return t.toLocaleDateString('th-TH')+' '+t.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});}
+function typeIcon(t){return{image:'🖼️',video:'🎬',audio:'🎵',pdf:'📕',document:'📄',archive:'📦'}[t]||'📎';}
+
+async function loadContent(){
+  loadingEl.classList.remove('hidden');contentEl.innerHTML='';statsEl.innerHTML='';
+  var url='/api/files'+(currentFolder?'?folder='+encodeURIComponent(currentFolder):'');
+  try{
+    var res=await fetch(url);var data=await res.json();
+    loadingEl.classList.add('hidden');
+
+    if(!currentFolder){
+      breadcrumbEl.innerHTML='<span style="color:#2563eb;font-weight:500;">📁 โฟลเดอร์ทั้งหมด</span>';
+      if(data.folders.length===0){contentEl.innerHTML='<div class="empty">📭 ยังไม่มีไฟล์ที่อัปโหลด<br><br><a href="/" style="font-size:13px;">← กลับไปอัปโหลด</a></div>';return;}
+      var tf=data.folders.reduce(function(s,f){return s+f.fileCount;},0);
+      var ts=data.folders.reduce(function(s,f){return s+f.totalSize;},0);
+      statsEl.innerHTML='<div class="stat-box"><div class="stat-num">'+data.folders.length+'</div><div class="stat-label">โฟลเดอร์</div></div><div class="stat-box"><div class="stat-num">'+tf+'</div><div class="stat-label">ไฟล์ทั้งหมด</div></div><div class="stat-box"><div class="stat-num">'+fmtSize(ts)+'</div><div class="stat-label">ขนาดรวม</div></div>';
+      var h='';data.folders.forEach(function(f,i){
+        h+='<div class="folder-card" style="animation-delay:'+(i*.04)+'s" onclick="openFolder(this.dataset.name)" data-name="'+f.name.replace(/"/g,'&quot;')+'">';
+        h+='<div class="icon-box icon-folder">📁</div><div style="flex:1;min-width:0;"><div style="font-weight:600;font-size:14px;">'+f.name+'</div><div class="meta">'+f.fileCount+' ไฟล์ · '+fmtSize(f.totalSize)+'</div></div>';
+        h+='<div class="actions"><button class="act-btn del" onclick="event.stopPropagation();deleteFolder(\''+f.name.replace(/'/g,"\\'")+'\')">🗑️ ลบ</button></div></div>';
+      });contentEl.innerHTML=h;
+    } else {
+      breadcrumbEl.innerHTML='<span style="color:#2563eb;cursor:pointer;font-weight:500;" onclick="goRoot()">📁 ทั้งหมด</span> <span style="color:#cbd5e1">›</span> <span style="font-weight:500;">'+currentFolder+'</span>';
+      if(data.files.length===0){contentEl.innerHTML='<div class="empty">📭 โฟลเดอร์ว่าง</div>';return;}
+      var ts=data.files.reduce(function(s,f){return s+f.size;},0);
+      statsEl.innerHTML='<div class="stat-box"><div class="stat-num">'+data.files.length+'</div><div class="stat-label">ไฟล์</div></div><div class="stat-box"><div class="stat-num">'+fmtSize(ts)+'</div><div class="stat-label">ขนาดรวม</div></div>';
+      var h='';data.files.forEach(function(f,i){
+        h+='<div class="file-card" style="animation-delay:'+(i*.03)+'s"><div class="icon-box icon-'+f.type+'">'+typeIcon(f.type)+'</div>';
+        h+='<div style="flex:1;min-width:0;"><div style="font-weight:500;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+f.name+'</div><div class="meta">'+fmtSize(f.size)+' · '+fmtDate(f.modified)+'</div></div>';
+        h+='<div class="actions"><a href="/download/'+encodeURIComponent(currentFolder)+'/'+encodeURIComponent(f.name)+'" class="act-btn dl">⬇ โหลด</a>';
+        h+='<button class="act-btn del" onclick="deleteFile(\''+f.name.replace(/'/g,"\\'")+'\')">🗑️</button></div></div>';
+      });contentEl.innerHTML=h;
+    }
+  }catch(e){loadingEl.classList.add('hidden');contentEl.innerHTML='<div class="empty" style="color:#dc2626;">❌ '+e.message+'</div>';}
+}
+
+function goRoot(){currentFolder='';loadContent();}
+function openFolder(n){currentFolder=n;loadContent();}
+async function deleteFile(n){showConfirm('ลบไฟล์ "'+n+'" ?',async function(){await fetch('/api/files/'+encodeURIComponent(currentFolder)+'/'+encodeURIComponent(n),{method:'DELETE'});loadContent();});}
+async function deleteFolder(n){showConfirm('ลบโฟลเดอร์ "'+n+'" และไฟล์ทั้งหมด?',async function(){await fetch('/api/folder/'+encodeURIComponent(n),{method:'DELETE'});loadContent();});}
+
+loadContent();
 </script>
 </body>
 </html>`;
