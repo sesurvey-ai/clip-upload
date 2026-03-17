@@ -239,7 +239,7 @@ const HTML_PAGE = `<!DOCTYPE html>
       <div id="resultSummary" style="font-size:13px;color:#64748b;margin-top:4px;"></div>
     </div>
     <div id="resultList" style="max-height:200px;overflow-y:auto;margin-bottom:16px;"></div>
-    <button id="resetBtn" class="btn btn-main" style="font-size:14px;padding:12px;">อัปโหลดชุดใหม่</button>
+    <button id="resetBtn" class="btn btn-main" style="font-size:14px;padding:12px;">อัปโหลด OK</button>
   </div>
 </div>
 
